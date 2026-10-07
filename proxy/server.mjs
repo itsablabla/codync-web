@@ -110,9 +110,13 @@ function proxyToHost(req, res, token) {
       timeout: 0,
     },
     (up) => {
+      // Some gateways buffer text/event-stream wholesale; NDJSON usually streams. The
+      // browser parses `data:` lines from the body itself, so the label doesn't matter.
+      const isEvents = (req.url || '').startsWith('/events')
       res.writeHead(up.statusCode || 502, {
-        'Content-Type': up.headers['content-type'] || 'application/json',
+        'Content-Type': isEvents ? 'application/x-ndjson' : up.headers['content-type'] || 'application/json',
         'Cache-Control': 'no-store',
+        'X-Accel-Buffering': 'no',
       })
       up.pipe(res)
     },
