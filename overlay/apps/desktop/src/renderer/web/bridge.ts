@@ -69,39 +69,41 @@ const bridge: CodyncBridge = {
     },
     stream(url, _token, onData, onEnd) {
       const controller = new AbortController()
-      // Idle timeout, not a total one: the host pings every 15 s, so silence this long means it's gone.
-      let idle: ReturnType<typeof setTimeout> | null = null
-      const arm = () => {
-        if (idle) clearTimeout(idle)
-        idle = setTimeout(() => controller.abort(), 45_000)
-      }
       void (async () => {
-        try {
-          arm()
-          const res = await fetch(withKey(url), { headers: { Accept: 'text/event-stream' }, signal: controller.signal })
-          if (res.status !== 200 || !res.body) throw { status: res.status, message: `Host error ${res.status}` } satisfies CallError
-          const reader = res.body.getReader()
-          const decoder = new TextDecoder()
-          let buffer = ''
-          for (;;) {
-            const { value, done } = await reader.read()
-            if (done) break
-            arm()
-            buffer += decoder.decode(value, { stream: true })
-            let nl: number
-            while ((nl = buffer.indexOf('\n')) >= 0) {
-              const line = buffer.slice(0, nl).replace(/\r$/, '')
-              buffer = buffer.slice(nl + 1)
-              if (line.startsWith('data:')) onData(line.slice(5).trimStart())
+        // The proxy turns the host's endless SSE into bounded long-poll responses (a
+        // buffering gateway would hold an open stream forever): each response ends after
+        // the first event batch or a quiet window. Reconnect at once on a clean end; the
+        // renderer only hears about real failures. Duplicate catch-up is fine (clients
+        // upsert by id/rev).
+        while (!controller.signal.aborted) {
+          try {
+            const res = await fetch(withKey(url), {
+              headers: { Accept: 'text/event-stream' },
+              // Safety net past the proxy's poll window; the renderer sees this as a
+              // link failure and reconnects with backoff.
+              signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]),
+            })
+            if (res.status !== 200 || !res.body) throw { status: res.status, message: `Host error ${res.status}` } satisfies CallError
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            for (;;) {
+              const { value, done } = await reader.read()
+              if (done) break
+              buffer += decoder.decode(value, { stream: true })
+              let nl: number
+              while ((nl = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, nl).replace(/\r$/, '')
+                buffer = buffer.slice(nl + 1)
+                if (line.startsWith('data:')) onData(line.slice(5).trimStart())
+              }
             }
+          } catch (error) {
+            if (controller.signal.aborted) return // closed by the caller, not a failure
+            const e = error as Partial<CallError>
+            onEnd({ status: e.status ?? 0, message: e.message ?? "Can't reach your computer." })
+            return
           }
-          onEnd(null)
-        } catch (error) {
-          if (controller.signal.aborted) return // closed by the caller, not a failure
-          const e = error as Partial<CallError>
-          onEnd({ status: e.status ?? 0, message: e.message ?? "Can't reach your computer." })
-        } finally {
-          if (idle) clearTimeout(idle)
         }
       })()
       return () => controller.abort()

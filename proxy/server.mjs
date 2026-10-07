@@ -110,13 +110,9 @@ function proxyToHost(req, res, token) {
       timeout: 0,
     },
     (up) => {
-      // Some gateways buffer text/event-stream wholesale; NDJSON usually streams. The
-      // browser parses `data:` lines from the body itself, so the label doesn't matter.
-      const isEvents = (req.url || '').startsWith('/events')
       res.writeHead(up.statusCode || 502, {
-        'Content-Type': isEvents ? 'application/x-ndjson' : up.headers['content-type'] || 'application/json',
+        'Content-Type': up.headers['content-type'] || 'application/json',
         'Cache-Control': 'no-store',
-        'X-Accel-Buffering': 'no',
       })
       up.pipe(res)
     },
@@ -126,6 +122,53 @@ function proxyToHost(req, res, token) {
     res.end(JSON.stringify({ error: "Can't reach the Codync host." }))
   })
   req.pipe(upstream)
+}
+
+// The host's SSE never ends, and buffering gateways hold an open response's body until it
+// completes, so streaming can't pass through them. Instead: subscribe upstream, forward
+// bytes as they arrive, and end the response ~300ms after the first `data:` line (event
+// batch) or when the window elapses with none. The browser bridge reconnects immediately,
+// so coverage stays continuous; duplicate catch-up after a reconnect is fine (clients
+// upsert by id/rev).
+const EVENTS_WINDOW_MS = Number(process.env.EVENTS_WINDOW_MS || 25_000)
+
+function longPollEvents(req, res, token) {
+  const upstream = http.get(
+    `${HOST_URL}${req.url}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' }, timeout: 0 },
+    (up) => {
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' })
+      let pending = ''
+      let sawEvent = false
+      let grace = null
+      const done = () => {
+        clearTimeout(windowTimer)
+        if (grace) clearTimeout(grace)
+        up.destroy()
+        res.end()
+      }
+      const windowTimer = setTimeout(done, EVENTS_WINDOW_MS)
+      up.on('data', (chunk) => {
+        res.write(chunk)
+        pending += chunk.toString('utf8')
+        let nl
+        while ((nl = pending.indexOf('\n')) >= 0) {
+          const line = pending.slice(0, nl)
+          pending = pending.slice(nl + 1)
+          // Keep-alive comments (`: ...`) don't count; real events end the poll shortly.
+          if (line.startsWith('data:')) sawEvent = true
+        }
+        if (sawEvent && !grace) grace = setTimeout(done, 300)
+      })
+      up.on('end', done)
+      up.on('error', done)
+      res.on('close', done) // client went away: stop the upstream subscription
+    },
+  )
+  upstream.on('error', () => {
+    if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: "Can't reach the Codync host." }))
+  })
 }
 
 const server = http.createServer(async (req, res) => {
@@ -158,7 +201,8 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Codync host is still starting.' }))
       return
     }
-    proxyToHost(req, res, token)
+    if (path === '/events') longPollEvents(req, res, token)
+    else proxyToHost(req, res, token)
     return
   }
 

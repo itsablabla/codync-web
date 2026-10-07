@@ -49,6 +49,12 @@ Env: `CODYNC_WEB_USER` (default `admin`), `PORT` (default `8080`), `CODYNC_HOST_
 - Host state lives under `/data/.codync` (HOME=/data): bots, transcripts, memory, token.
 - Desktop-only features (install/restart host, SSH tunnels, remote screen, speech, account
   sign-in) are unavailable in the web UI by design.
+- **Events over buffering gateways:** the host's `/events` SSE never ends, and gateways that
+  buffer responses would hold it forever. The proxy instead serves bounded long-polls: it
+  forwards the upstream stream and ends the response ~300 ms after the first event batch,
+  or after a quiet window (`EVENTS_WINDOW_MS`, default 25 s). The web bridge reconnects
+  immediately, so coverage is continuous; duplicate catch-up is harmless (clients upsert by
+  id/rev).
 - No agent CLIs are installed in the image; install what your bots need (e.g. Claude Code)
   in the running container or extend the Dockerfile.
 - Never expose this without a password set; the proxy refuses to start without
