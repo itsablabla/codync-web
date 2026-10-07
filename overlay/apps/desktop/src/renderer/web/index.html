@@ -54,7 +54,7 @@
         error.textContent = ''
         const body = new URLSearchParams(new FormData(form))
         try {
-          const res = await fetch('/__codync_login', { method: 'POST', body })
+          const res = await fetch('./__codync_login', { method: 'POST', body })
           const data = await res.json()
           if (!res.ok) throw new Error(data.error || 'Sign-in failed')
           localStorage.setItem(STORE_KEY, data.token)
@@ -67,7 +67,7 @@
       // A key that no longer works (password rotated) should send the user back to the gate.
       async function keyWorks(key) {
         try {
-          const res = await fetch(`/api/hello?k=${encodeURIComponent(key)}`, { method: 'POST', body: '{}' })
+          const res = await fetch(`./api/hello?k=${encodeURIComponent(key)}`, { method: 'POST', body: '{}' })
           return res.status !== 401
         } catch {
           return true // unreachable host: let the app show its own error

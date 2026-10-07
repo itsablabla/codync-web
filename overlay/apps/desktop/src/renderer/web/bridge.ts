@@ -13,6 +13,10 @@ try {
   PROXY_KEY = localStorage.getItem('codync-proxy-key') ?? ''
 } catch {}
 
+// The app may be mounted under a path prefix (e.g. a gateway's /a/<id>/), so API calls must
+// be relative to the page's directory — not the origin root. <base> is pinned in index.html.
+const BASE_URL = document.baseURI.replace(/\/$/, '')
+
 function withKey(url: string) {
   return `${url}${url.includes('?') ? '&' : '?'}k=${encodeURIComponent(PROXY_KEY)}`
 }
@@ -22,8 +26,9 @@ const unavailable = () => Promise.reject(new Error('Not available in the web app
 
 const snapshot: HostSnapshot = {
   state: { kind: 'running' },
-  // Same origin: the proxy forwards /api/<method> and /events to the loopback host.
-  local: { computerId: 'web', baseURL: window.location.origin, token: 'proxy' },
+  // Same origin and same path prefix: the proxy forwards /api/<method> and /events to the
+  // loopback host.
+  local: { computerId: 'web', baseURL: BASE_URL, token: 'proxy' },
   dev: false,
   logPath: '',
 }
