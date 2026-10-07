@@ -4,8 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
+    <script>
+      // Must be first in <head>: the public URL can lack a trailing slash (hosting gateways
+      // often don't redirect), which would resolve the bundle's relative asset URLs one
+      // segment too high. Pin the base to the page's own directory.
+      document.head.prepend(Object.assign(document.createElement('base'), { href: location.pathname.replace(/\/?$/, '/') }))
+    </script>
     <title>Codync</title>
     <style>
+      #gate[hidden] { display: none; }
       #gate { min-height: 100vh; display: grid; place-items: center; background: #0b0b0d; color: #e7e7ea; font-family: -apple-system, system-ui, sans-serif; }
       #gate form { display: grid; gap: 12px; width: 280px; }
       #gate h1 { font-size: 18px; font-weight: 600; margin: 0 0 8px; }
