@@ -1,9 +1,11 @@
 // Codync web proxy: password gate at the edge, static SPA, and /api/* + /events forwarded
 // to the loopback codync-host with its token added server-side. No dependencies.
 //
-// Auth: a login form sets an HMAC-signed cookie (some hosting gateways strip the
-// Authorization header, so plain basic auth can't reach us); `Authorization: Basic` is
-// still accepted for non-browser clients on a direct connection.
+// Auth: the login page POSTs the password and gets a capability key (HMAC of the user with
+// the password) in the response body; the SPA keeps it in localStorage and sends it as the
+// `k` query parameter on API and SSE calls. Headers can't carry it: some hosting gateways
+// strip inbound Authorization/Cookie and mask outbound Set-Cookie, but the request line and
+// bodies pass through. `Authorization: Basic` is still accepted for direct clients.
 //
 // Env:
 //   CODYNC_WEB_PASSWORD  password (required; the server refuses to start without it)
@@ -26,7 +28,6 @@ const TOKEN_FILE = process.env.CODYNC_TOKEN_FILE || `${process.env.HOME}/.codync
 const WEB_ROOT = resolve(process.env.WEB_ROOT || join(fileURLToPath(new URL('.', import.meta.url)), 'web'))
 const USER = process.env.CODYNC_WEB_USER || 'admin'
 const PASSWORD = process.env.CODYNC_WEB_PASSWORD || ''
-const COOKIE = 'codync_auth'
 
 if (!PASSWORD) {
   console.error('CODYNC_WEB_PASSWORD is required: this proxy grants full control of the host.')
@@ -41,7 +42,7 @@ async function hostToken() {
   }
 }
 
-function cookieValue(user) {
+function capabilityKey(user) {
   const sig = createHmac('sha256', PASSWORD).update(`codync:${user}`).digest('base64url')
   return `${encodeURIComponent(user)}.${sig}`
 }
@@ -52,12 +53,9 @@ function eq(a, b) {
   return x.length === y.length && timingSafeEqual(x, y)
 }
 
-function authorized(req) {
-  // Session cookie (browser path).
-  const cookies = Object.fromEntries(
-    (req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).filter((p) => p.length === 2),
-  )
-  if (cookies[COOKIE] && eq(cookies[COOKIE], cookieValue(USER))) return true
+function authorized(req, url) {
+  // Capability key in the query string (browser path; survives header-stripping gateways).
+  if (url.searchParams.get('k') && eq(url.searchParams.get('k'), capabilityKey(USER))) return true
   // Basic auth (direct clients; may be stripped by hosting gateways).
   const header = req.headers.authorization || ''
   if (header.startsWith('Basic ')) {
@@ -71,38 +69,6 @@ function authorized(req) {
     if (i > 0 && eq(pair.slice(0, i), USER) && eq(pair.slice(i + 1), PASSWORD)) return true
   }
   return false
-}
-
-const LOGIN_PAGE = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex" />
-    <title>Codync — sign in</title>
-    <style>
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0b0d; color: #e7e7ea; font-family: -apple-system, system-ui, sans-serif; }
-      form { display: grid; gap: 12px; width: 280px; }
-      h1 { font-size: 18px; font-weight: 600; margin: 0 0 8px; }
-      input, button { padding: 10px 12px; border-radius: 8px; border: 1px solid #3a3a40; background: #17171a; color: inherit; font-size: 14px; }
-      button { background: #e7e7ea; color: #0b0b0d; border: none; cursor: pointer; font-weight: 600; }
-      .err { color: #ff6b6b; font-size: 13px; min-height: 1em; margin: 0; }
-    </style>
-  </head>
-  <body>
-    <form method="POST" action="/__codync_login">
-      <h1>Codync</h1>
-      <input name="user" placeholder="Username" autocomplete="username" value="admin" />
-      <input name="password" type="password" placeholder="Password" autocomplete="current-password" autofocus />
-      <button type="submit">Sign in</button>
-      <p class="err">ERR</p>
-    </form>
-  </body>
-</html>`
-
-function sendLogin(res, error = '') {
-  res.writeHead(error ? 401 : 200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-  res.end(LOGIN_PAGE.replace('ERR', error))
 }
 
 const MIME = {
@@ -162,39 +128,26 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost')
   const path = url.pathname
 
-  // Login form submission: set the signed cookie on success.
+  // Login: exchange the password for the capability key, returned in the body (response
+  // bodies pass through gateways that mask Set-Cookie and strip inbound auth headers).
   if (path === '/__codync_login' && req.method === 'POST') {
     const params = new URLSearchParams((await readBody(req)).toString('utf8'))
     if (eq(params.get('user') || '', USER) && eq(params.get('password') || '', PASSWORD)) {
-      res.writeHead(303, {
-        'Set-Cookie': `${COOKIE}=${cookieValue(USER)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`,
-        Location: '/',
-      })
-      res.end()
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ token: capabilityKey(USER) }))
     } else {
-      sendLogin(res, 'Wrong username or password.')
-    }
-    return
-  }
-
-  if (path === '/__codync_logout') {
-    res.writeHead(303, { 'Set-Cookie': `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`, Location: '/' })
-    res.end()
-    return
-  }
-
-  if (!authorized(req)) {
-    // API/SSE callers get a bare 401; pages get the login form.
-    if (path.startsWith('/api/') || path === '/events') {
       res.writeHead(401, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ error: 'Unauthorized' }))
-    } else {
-      sendLogin(res)
+      res.end(JSON.stringify({ error: 'Wrong username or password.' }))
     }
     return
   }
 
   if (path.startsWith('/api/') || path === '/events') {
+    if (!authorized(req, url)) {
+      res.writeHead(401, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
     const token = await hostToken()
     if (!token) {
       res.writeHead(503, { 'Content-Type': 'application/json' })
@@ -205,7 +158,9 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // Static SPA: exact file, else index.html. No path escapes from WEB_ROOT.
+  // Static SPA: exact file, else index.html. No path escapes from WEB_ROOT. Served without
+  // auth: the bundle is the upstream open-source UI (no secrets); the login gate runs in the
+  // page itself, and every host-controlling route (/api/*, /events) stays gated above.
   let file = normalize(join(WEB_ROOT, path))
   if (!file.startsWith(WEB_ROOT + sep) && file !== WEB_ROOT) file = join(WEB_ROOT, 'index.html')
   let data

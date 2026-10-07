@@ -4,12 +4,23 @@ A self-hosted web UI for [Codync](https://www.codync.dev): the real desktop app'
 built for the browser and pointed at a live `codync-host` over a same-origin proxy.
 
 ```
-browser ──basic auth──> proxy (server.mjs) ──loopback + token──> codync-host :19222
+browser ──login form──> proxy (server.mjs) ──loopback + token──> codync-host :19222
+              └─ capability key (k query param) on API/SSE calls ┘
 ```
 
 The host's API is loopback-only (`POST /api/<method>` + SSE `/events`, bearer token in
-`~/.codync/token`). The proxy runs on the same machine/container, injects the token
-server-side, and requires HTTP basic auth on every request. The browser never sees the token.
+`~/.codync/token`). The proxy runs on the same machine/container and injects the token
+server-side; the browser never sees it.
+
+**Auth design:** the login page (a gate inside `index.html`) POSTs the password to
+`/__codync_login` and gets back a capability key (HMAC of the username with the password).
+The app stores it in `localStorage` and sends it as the `k` query parameter on every
+`/api/*` and `/events` call. Headers can't be used: some hosting gateways strip inbound
+`Authorization`/`Cookie` and mask outbound `Set-Cookie`, but the request line and bodies
+pass through. `Authorization: Basic` is also accepted for direct (non-gateway) clients.
+Static assets are served openly: the bundle is the upstream open-source UI and carries no
+secrets; every host-controlling route stays gated. Rotating `CODYNC_WEB_PASSWORD` rotates
+the capability key.
 
 ## Layout
 
@@ -40,5 +51,5 @@ Env: `CODYNC_WEB_USER` (default `admin`), `PORT` (default `8080`), `CODYNC_HOST_
   sign-in) are unavailable in the web UI by design.
 - No agent CLIs are installed in the image; install what your bots need (e.g. Claude Code)
   in the running container or extend the Dockerfile.
-- Never expose this without the basic-auth password set; the proxy refuses to start without
+- Never expose this without a password set; the proxy refuses to start without
   `CODYNC_WEB_PASSWORD`.

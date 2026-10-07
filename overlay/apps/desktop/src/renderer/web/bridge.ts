@@ -2,9 +2,20 @@ import type { AccountState, CallError, CodyncBridge, HostSnapshot, UpdateState }
 import { version } from '../../../package.json'
 
 // `window.codync` for the browser, on a real host: `call`/`stream` go to the same-origin
-// proxy, which adds the host token server-side (the browser never sees it). Everything the
+// proxy, which adds the host token server-side (the browser never sees it). Our own proxy
+// auth rides as the `k` query parameter (gateways may strip Authorization/Cookie), with the
+// capability key kept in localStorage by the login gate in index.html. Everything the
 // desktop shell owns (install/restart, SSH, speech, account sign-in, updates) is a no-op or
 // unavailable. Modeled on the website demo's bridge (src/renderer/demo/bridge.ts).
+
+let PROXY_KEY = ''
+try {
+  PROXY_KEY = localStorage.getItem('codync-proxy-key') ?? ''
+} catch {}
+
+function withKey(url: string) {
+  return `${url}${url.includes('?') ? '&' : '?'}k=${encodeURIComponent(PROXY_KEY)}`
+}
 
 const none = () => () => {}
 const unavailable = () => Promise.reject(new Error('Not available in the web app'))
@@ -37,7 +48,7 @@ const bridge: CodyncBridge = {
     async call(baseURL, _token, method, body, timeoutMs) {
       let res: Response
       try {
-        res = await fetch(`${baseURL}/api/${method}`, {
+        res = await fetch(withKey(`${baseURL}/api/${method}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body ?? {}),
@@ -67,7 +78,7 @@ const bridge: CodyncBridge = {
       void (async () => {
         try {
           arm()
-          const res = await fetch(url, { headers: { Accept: 'text/event-stream' }, signal: controller.signal })
+          const res = await fetch(withKey(url), { headers: { Accept: 'text/event-stream' }, signal: controller.signal })
           if (res.status !== 200 || !res.body) throw { status: res.status, message: `Host error ${res.status}` } satisfies CallError
           const reader = res.body.getReader()
           const decoder = new TextDecoder()
